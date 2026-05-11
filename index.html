@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>航空货邮舱单智能识别</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: 'Microsoft YaHei', sans-serif; margin: 20px; background: #f5f5f5; }
+    .container { max-width: 1400px; margin: 0 auto; }
+    .header { background: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .btn { padding: 10px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; margin-right: 10px; }
+    .btn-primary { background: #1890ff; color: white; }
+    .btn-primary:hover { background: #1677cc; }
+    .btn-success { background: #52c41a; color: white; }
+    .btn-success:hover { background: #469e15; }
+    .btn-danger { background: #ff4d4f; color: white; }
+    .btn-danger:hover { background: #d9363e; }
+    .progress { margin-top: 15px; padding: 10px; background: #e6f7ff; border-radius: 6px; color: #1890ff; display: none; }
+    .preview-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+    .preview-item { position: relative; width: 150px; }
+    .preview-item img { width: 150px; height: 100px; object-fit: cover; border-radius: 6px; border: 1px solid #e8e8e8; background: #fff; }
+    .preview-item .delete-btn { position: absolute; top: -5px; right: -5px; width: 20px; height: 20px; background: #ff4d4f; color: white; border: none; border-radius: 50%; cursor: pointer; font-size: 12px; line-height: 18px; }
+    .preview-item .name { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
+    .summary { padding: 15px; background: white; border-radius: 6px; margin-bottom: 15px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+    .summary span { margin-right: 25px; font-weight: bold; }
+    .table-container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+    th { background: #fafafa; padding: 8px 6px; border: 1px solid #e8e8e8; font-weight: 600; position: sticky; top: 0; }
+    td { padding: 6px; border: 1px solid #e8e8e8; text-align: center; }
+    tr.error-row { background-color: #fff1f0 !important; }
+    tr.error-row td { color: #ff4d4f; font-weight: bold; }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
+    .modal-content { background: white; padding: 30px; border-radius: 10px; max-width: 500px; text-align: center; }
+    .modal-content p { margin: 15px 0; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2 style="margin:0 0 15px 0;">✈️ 航空货邮舱单智能识别</h2>
+    <button class="btn btn-primary" onclick="selectFiles()">📁 上传图片</button>
+    <button class="btn btn-success" onclick="recognizeAll()" id="btnRecognize" disabled>🔍 开始识别</button>
+    <button class="btn btn-danger" onclick="clearAll()">🗑 清空全部</button>
+    <button class="btn btn-success" onclick="exportExcel()" id="btnExport" disabled>📥 导出 Excel</button>
+    <div class="progress" id="progress"></div>
+    <div class="preview-list" id="previewList"></div>
+  </div>
+  <div class="summary" id="summary" style="display:none;"></div>
+  <div class="table-container">
+    <table id="dataTable">
+      <thead>
+      <tr>
+        <th>状态</th><th>导入时间</th><th>航班号</th><th>航班日期</th><th>飞机号</th><th>出发站</th><th>到达站</th><th>起飞时间</th>
+        <th>序号</th><th>集装器号</th><th>集装器-件数</th><th>集装器-重量</th><th>运单号</th>
+        <th>运单-件数(当前)</th><th>运单-件数(总计)</th><th>运单-重量(当前)</th><th>运单-重量(总计)</th>
+        <th>处理代码</th><th>品名</th><th>始发站</th><th>目的站</th><th>优先级</th><th>备注</th>
+      </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="modal" id="exportModal">
+  <div class="modal-content">
+    <h3>校验发现异常</h3>
+    <p id="modalMsg"></p>
+    <button class="btn btn-success" onclick="forceExport()">强制导出</button>
+    <button class="btn btn-primary" onclick="closeModal()">返回修改</button>
+  </div>
+</div>
+
+<script>
+  // ==================== 配置 ====================
+  // 代理接口地址（使用相对路径，同项目下自动生效）
+  const PROXY_URL = '/api/proxy';
+
+  // ==================== 状态 ====================
+  let images = [];        // { id, name, base64 }
+  let allRecords = [];    // 所有识别记录
+
+  // ==================== 文件上传 ====================
+  function selectFiles() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/jpeg,image/png';
+    input.multiple = true;
+    input.onchange = async (e) => {
+      const files = Array.from(e.target.files);
+      for (const file of files) {
+        const base64 = await fileToBase64(file);
+        images.push({ id: Date.now() + Math.random(), name: file.name, base64 });
+      }
+      renderPreview();
+      document.getElementById('btnRecognize').disabled = false;
+    };
+    input.click();
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function renderPreview() {
+    const list = document.getElementById('previewList');
+    list.innerHTML = images.map((img, i) =>
+      `<div class="preview-item">
+          <img src="data:image/jpeg;base64,${img.base64}" alt="${img.name}">
+          <button class="delete-btn" onclick="removeImage(${i})">×</button>
+          <div class="name">${img.name}</div>
+        </div>`
+    ).join('');
+  }
+
+  function removeImage(index) {
+    images.splice(index, 1);
+    allRecords = allRecords.filter(r => r.imageIndex !== index);
+    renderPreview();
+    refreshTable();
+    if (images.length === 0) {
+      document.getElementById('btnRecognize').disabled = true;
+      document.getElementById('btnExport').disabled = true;
+    }
+  }
+
+  function clearAll() {
+    images = [];
+    allRecords = [];
+    document.getElementById('previewList').innerHTML = '';
+    document.getElementById('tableBody').innerHTML = '';
+    document.getElementById('summary').style.display = 'none';
+    document.getElementById('btnRecognize').disabled = true;
+    document.getElementById('btnExport').disabled = true;
+  }
+
+  // ==================== Prompt 构建 ====================
+  function buildPrompt() {
+    return `你是航空货邮舱单识别专家。请严格按照JSON格式返回结果，不要包含任何其他文字，不要使用代码块。
+
+规则：
+1. 表格两行一组：第一行集装器信息（序号、集装器号、件数、重量），第二行运单明细。一个集装器下多条运单时，集装器信息每行都复制。
+2. 形如"13/81"的字段拆分为当前值13和总计值81。
+3. 底部总计提取货物总件数、总重量和邮件总件数、总重量。
+4. 缺失字段用""表示，数字用数字类型。
+
+JSON结构：
+{
+  "flight_header": {
+    "flight_no": "", "flight_date": "", "aircraft_no": "",
+    "departure": "", "arrival": "", "departure_time": ""
+  },
+  "records": [
+    {
+      "seq": 1,
+      "uld_no": "", "uld_pcs": 0, "uld_weight": 0,
+      "awb_no": "", "awb_pcs_current": 0, "awb_pcs_total": 0,
+      "awb_weight_current": 0.0, "awb_weight_total": 0.0,
+      "handling_code": "", "cargo_name": "",
+      "origin": "", "dest": "", "priority": "", "remark": ""
+    }
+  ],
+  "summary": {
+    "cargo_total_pcs": 0, "cargo_total_weight": 0.0,
+    "mail_total_pcs": 0, "mail_total_weight": 0.0
+  }
+}`;
+  }
+
+  // ==================== API 调用 ====================
+  async function callGLM4V(base64) {
+    const body = {
+      model: "glm-4v",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: buildPrompt() },
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64}` } }
+        ]
+      }],
+      temperature: 0.1,
+      max_tokens: 4096,
+      response_format: { type: "json_object" }
+    };
+
+    const res = await fetch(PROXY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`代理错误 ${res.status}: ${errText}`);
+    }
+
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return JSON.parse(data.choices[0].message.content);
+  }
+
+  // ==================== 识别处理 ====================
+  async function recognizeAll() {
+    const progress = document.getElementById('progress');
+    progress.style.display = 'block';
+    allRecords = [];
+
+    for (let i = 0; i < images.length; i++) {
+      progress.textContent = `正在识别第 ${i+1}/${images.length} 张图片 (${images[i].name})...`;
+      try {
+        const result = await callGLM4V(images[i].base64);
+        processResult(result, i);
+      } catch (e) {
+        alert(`第 ${i+1} 张识别失败: ${e.message}`);
+        console.error(e);
+      }
+    }
+
+    runValidation();
+    refreshTable();
+    renderSummary();
+    progress.style.display = 'none';
+    document.getElementById('btnExport').disabled = false;
+  }
+
+  function processResult(res, imageIdx) {
+    const h = res.flight_header || {};
+    (res.records || []).forEach(r => {
+      allRecords.push({
+        status: '正常',
+        importTime: new Date().toLocaleString('zh-CN'),
+        flightNo: h.flight_no || '',
+        flightDate: h.flight_date || '',
+        aircraftNo: h.aircraft_no || '',
+        departure: h.departure || '',
+        arrival: h.arrival || '',
+        departureTime: h.departure_time || '',
+        seq: r.seq ?? '',
+        uldNo: r.uld_no || '',
+        uldPcs: r.uld_pcs ?? '',
+        uldWeight: r.uld_weight ?? '',
+        awbNo: r.awb_no || '',
+        awbPcsCurrent: r.awb_pcs_current ?? '',
+        awbPcsTotal: r.awb_pcs_total ?? '',
+        awbWeightCurrent: r.awb_weight_current ?? '',
+        awbWeightTotal: r.awb_weight_total ?? '',
+        handlingCode: r.handling_code || '',
+        cargoName: r.cargo_name || '',
+        origin: r.origin || '',
+        dest: r.dest || '',
+        priority: r.priority || '',
+        remark: r.remark || '',
+        imageIndex: imageIdx,
+        rawSummary: res.summary || {}
+      });
+    });
+  }
+
+  // ==================== 校验 ====================
+  function runValidation() {
+    const groups = {};
+    allRecords.forEach(r => {
+      if (!groups[r.imageIndex]) groups[r.imageIndex] = [];
+      groups[r.imageIndex].push(r);
+    });
+
+    Object.values(groups).forEach(rows => {
+      // R1: 运单号分类
+      rows.forEach(r => {
+        const awb = r.awbNo || '';
+        if (awb.startsWith('088-')) r.category = '货物';
+        else if (awb.startsWith('000-')) r.category = '邮件';
+        else if (awb === '') r.status = '异常：运单号为空';
+        else r.status = '异常：运单号格式错误';
+      });
+
+      // R2: 合计校验
+      const summary = rows[0].rawSummary;
+      const computedPcs = rows.reduce((sum, r) => sum + (parseFloat(r.awbPcsCurrent) || 0), 0);
+      const computedWeight = rows.reduce((sum, r) => sum + (parseFloat(r.awbWeightCurrent) || 0), 0);
+      const expectedPcs = (parseFloat(summary.cargo_total_pcs) || 0) + (parseFloat(summary.mail_total_pcs) || 0);
+      const expectedWeight = (parseFloat(summary.cargo_total_weight) || 0) + (parseFloat(summary.mail_total_weight) || 0);
+
+      if (computedPcs !== expectedPcs || computedWeight !== expectedWeight) {
+        rows.forEach(r => {
+          if (r.status === '正常') r.status = '';
+          r.status += `合计校验失败：件数${computedPcs}≠${expectedPcs} / 重量${computedWeight}≠${expectedWeight}`;
+        });
+      }
+    });
+  }
+
+  function refreshTable() {
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = allRecords.map(r => {
+      const isError = r.status !== '正常';
+      return `<tr class="${isError ? 'error-row' : ''}">
+        <td>${r.status}</td>
+        <td>${r.importTime}</td>
+        <td>${r.flightNo}</td>
+        <td>${r.flightDate}</td>
+        <td>${r.aircraftNo}</td>
+        <td>${r.departure}</td>
+        <td>${r.arrival}</td>
+        <td>${r.departureTime}</td>
+        <td>${r.seq}</td>
+        <td>${r.uldNo}</td>
+        <td>${r.uldPcs}</td>
+        <td>${r.uldWeight}</td>
+        <td>${r.awbNo}</td>
+        <td>${r.awbPcsCurrent}</td>
+        <td>${r.awbPcsTotal}</td>
+        <td>${r.awbWeightCurrent}</td>
+        <td>${r.awbWeightTotal}</td>
+        <td>${r.handlingCode}</td>
+        <td>${r.cargoName}</td>
+        <td>${r.origin}</td>
+        <td>${r.dest}</td>
+        <td>${r.priority}</td>
+        <td>${r.remark}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderSummary() {
+    const cargoPcs = allRecords.filter(r => r.awbNo?.startsWith('088-')).reduce((sum,r) => sum + (+r.awbPcsCurrent||0), 0);
+    const mailPcs = allRecords.filter(r => r.awbNo?.startsWith('000-')).reduce((sum,r) => sum + (+r.awbPcsCurrent||0), 0);
+    const errorCount = allRecords.filter(r => r.status !== '正常').length;
+    const summary = document.getElementById('summary');
+    summary.innerHTML = `
+      <span>📊 总记录：${allRecords.length}</span>
+      <span>📦 货物件数：${cargoPcs}</span>
+      <span>📧 邮件件数：${mailPcs}</span>
+      <span style="color:red;">❗ 异常：${errorCount}</span>
+    `;
+    summary.style.display = 'block';
+  }
+
+  // ==================== 导出 ====================
+  function exportExcel() {
+    const errorCount = allRecords.filter(r => r.status !== '正常').length;
+    if (errorCount > 0) {
+      document.getElementById('modalMsg').innerText = `发现 ${errorCount} 条异常记录。是否强制导出？异常行将标红。`;
+      document.getElementById('exportModal').style.display = 'flex';
+      return;
+    }
+    doExport(false);
+  }
+
+  function forceExport() { closeModal(); doExport(true); }
+  function closeModal() { document.getElementById('exportModal').style.display = 'none'; }
+
+  function doExport(force) {
+    const exportData = allRecords.map(({imageIndex, rawSummary, category, ...rest}) => rest);
+    const ws = XLSX.utils.json_to_sheet(exportData);
+    if (force) {
+      for (let i = 0; i < exportData.length; i++) {
+        if (exportData[i].status !== '正常') {
+          const rowIdx = i + 1;
+          for (let c = 0; c < 23; c++) {
+            const cell = XLSX.utils.encode_cell({r: rowIdx, c});
+            if (ws[cell]) ws[cell].s = { fill: { fgColor: { rgb: "FFFFF1F0" } } };
+          }
+        }
+      }
+    }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '舱单台账');
+    const d = new Date();
+    const name = `舱单台账_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.xlsx`;
+    XLSX.writeFile(wb, name);
+  }
+
+  function pad(n) { return n.toString().padStart(2, '0'); }
+</script>
+</body>
+</html>
